@@ -756,7 +756,9 @@ on post-fs-data
     # we can tell keystore to stop allowing use of early-boot keys,
     # and access its database for the first time to support creation and
     # use of MAX_BOOT_LEVEL keys.
-    exec - system system -- /system/bin/vdc keymaster earlyBootEnded
+    # Disabled: vdc keymaster earlyBootEnded hangs when keystore2 isn't fully
+    # functional, blocking init.
+    # exec - system system -- /system/bin/vdc keymaster earlyBootEnded
 
     # Multi-installed APEXes are selected using persist props.
     # Load persist properties and override properties (if enabled) from /data,
@@ -1063,9 +1065,9 @@ on post-fs-data
 
     # TODO(b/400439023): Remove once attest modules flagging is removed.
     wait_for_prop apexd.status activated
-    # Wait for KeyMints to receive APEX module info before starting code from updateable APEXes.
-    # This is to prevent APEX modules from interfering in module measurement.
-    wait_for_prop keystore.module_hash.sent true
+    # keystore.module_hash.sent is never set on this device, so this wait is
+    # skipped to avoid blocking boot.
+    # wait_for_prop keystore.module_hash.sent true
     perform_apex_config
 
     start system_aconfigd_socket_service

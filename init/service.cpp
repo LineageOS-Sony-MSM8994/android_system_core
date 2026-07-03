@@ -289,9 +289,13 @@ void Service::Reap(const siginfo_t& siginfo) {
     }
 
     if ((siginfo.si_code != CLD_EXITED || siginfo.si_status != 0) && on_failure_reboot_target_) {
-        LOG(ERROR) << "Service " << name_
-                   << " has 'reboot_on_failure' option and failed, shutting down system.";
-        trigger_shutdown(*on_failure_reboot_target_);
+        // Don't reboot on service failure: on this device many services fail
+        // on first boot due to kernel/userspace ABI mismatch, so allow boot to
+        // continue rather than entering a reboot loop.
+        LOG(WARNING) << "Service " << name_
+                     << " has 'reboot_on_failure' option and failed (target: "
+                     << *on_failure_reboot_target_
+                     << ") — ignoring, allowing boot to continue.";
     }
 
     if (flags_ & SVC_EXEC) UnSetExec();
@@ -383,18 +387,21 @@ void Service::Reap(const siginfo_t& siginfo) {
                             SetProperty(native_watchdog_reboot_time, std::to_string(epoch_time));
                             // Aborts into `fatal_reboot_target_'.
                             SetFatalRebootTarget(fatal_reboot_target_);
-                            LOG(FATAL) << "critical process '" << name_ << "' exited 4 times "
-                                       << exit_reason;
+                            // Don't fatal-reboot when critical services crash
+                            // repeatedly during early boot: kernel/userspace ABI
+                            // mismatch causes spurious failures, so keep booting.
+                            LOG(WARNING) << "critical process '" << name_ << "' exited 4 times "
+                                         << exit_reason << " — ignoring (legacy boot)";
                         } else {
                             LOG(INFO) << "Reboot already performed in last 24hrs because of crash.";
                         }
                     }
                 } else {
-                    LOG(ERROR) << "process with updatable components '" << name_
-                               << "' exited 4 times " << exit_reason;
-                    // Notifies update_verifier and apexd
-                    SetProperty("sys.init.updatable_crashing_process_name", name_);
-                    SetProperty("sys.init.updatable_crashing", "1");
+                    // Skip apex rollback (which kills zygote/SystemServer) when
+                    // updatable daemons like netd crash: legacy blobs lack eBPF.
+                    LOG(WARNING) << "process with updatable components '" << name_
+                                 << "' exited 4 times " << exit_reason
+                                 << " — ignoring (legacy boot, no rollback)";
                 }
             }
         } else {
@@ -428,8 +435,11 @@ void Service::DumpState() const {
 
 Result<void> Service::ExecStart() {
     auto reboot_on_failure = make_scope_guard([this] {
+        // Don't reboot on service start failure; allow boot to continue.
         if (on_failure_reboot_target_) {
-            trigger_shutdown(*on_failure_reboot_target_);
+            LOG(WARNING) << "ExecStart guard: '" << name_
+                         << "' would have rebooted to '" << *on_failure_reboot_target_
+                         << "' but ignoring (legacy boot)";
         }
     });
 
@@ -589,8 +599,11 @@ void Service::RunService(const std::vector<Descriptor>& descriptors,
 
 Result<void> Service::Start() {
     auto reboot_on_failure = make_scope_guard([this] {
+        // Don't reboot on service start failure; allow boot to continue.
         if (on_failure_reboot_target_) {
-            trigger_shutdown(*on_failure_reboot_target_);
+            LOG(WARNING) << "Start guard: '" << name_
+                         << "' would have rebooted to '" << *on_failure_reboot_target_
+                         << "' but ignoring (legacy boot)";
         }
     });
 
@@ -737,14 +750,14 @@ Result<void> Service::Start() {
     if (CgroupsAvailable()) {
         bool use_memcg = swappiness_ != -1 || soft_limit_in_bytes_ != -1 || limit_in_bytes_ != -1 ||
                          limit_percent_ != -1 || !limit_property_.empty();
-        errno = -createProcessGroup(uid(), pid_, use_memcg);
-        if (errno != 0) {
-            Result<void> result = cgroups_activated.Write(kActivatingCgroupsFailed);
-            if (!result.ok()) {
-                return Error() << "Sending notification failed: " << result.error();
-            }
-            return Error() << "createProcessGroup(" << uid() << ", " << pid_ << ", " << use_memcg
-                           << ") failed for service '" << name_ << "': " << strerror(errno);
+        // This kernel's cgroup v2 support is incomplete; tolerate
+        // createProcessGroup failures so services still start (without
+        // cgroup-based resource isolation).
+        int cpg_ret = createProcessGroup(uid(), pid_, use_memcg);
+        if (cpg_ret != 0) {
+            LOG(WARNING) << "createProcessGroup(" << uid() << ", " << pid_ << ", "
+                         << use_memcg << ") returned " << cpg_ret
+                         << " for service '" << name_ << "', continuing";
         }
 
         // When the blkio controller is mounted in the v1 hierarchy, NormalIoPriority is

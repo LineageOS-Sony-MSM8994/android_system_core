@@ -190,7 +190,9 @@ int fs_mgr_do_format(const FstabEntry& entry) {
     LERROR << __FUNCTION__ << ": Format " << entry.blk_device << " as '" << entry.fs_type << "'";
 
     bool needs_casefold = false;
-    bool needs_projid = true;
+    // PROJECT quotas (EXT4 feature 0x2000) require kernel >= 4.4; older kernels
+    // reject a FS carrying this bit. Allow opt-out via prop.
+    bool needs_projid = android::base::GetBoolProperty("ro.vold.projid_quotas", true);
 
     if (entry.mount_point == "/data") {
         needs_casefold = android::base::GetBoolProperty("external_storage.casefold.enabled", false);
