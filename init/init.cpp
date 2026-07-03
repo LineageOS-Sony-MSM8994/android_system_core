@@ -221,6 +221,15 @@ static class PropWaiterState {
     // negatives are not possible and therefore we're okay.
     bool MightBeWaiting() {
         auto lock = std::lock_guard{lock_};
+        // Time out wait_for_prop after 30s so init doesn't block forever on
+        // properties that may never get set (e.g. apexd.status, keystore.*, odsign.*).
+        if (waiting_for_prop_ &&
+            waiting_for_prop_->duration() > std::chrono::seconds(30)) {
+            LOG(WARNING) << "Wait for property '" << wait_prop_name_ << "=" << wait_prop_value_
+                         << "' timed out after 30s, continuing boot.";
+            ResetWaitForPropLocked();
+            return false;
+        }
         return static_cast<bool>(waiting_for_prop_);
     }
 

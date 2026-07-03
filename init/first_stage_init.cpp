@@ -128,7 +128,7 @@ static void Copy(const char* src, const char* dst) {
 
 // Move snapuserd before switching root, so that it is available at the same path
 // after switching root.
-void PrepareSwitchRoot() {
+[[maybe_unused]] void PrepareSwitchRoot() {
     static constexpr const auto& snapuserd = "/system/bin/snapuserd";
     static constexpr const auto& snapuserd_ramdisk = "/system/bin/snapuserd_ramdisk";
     static constexpr const auto& dst = "/first_stage_ramdisk/system/bin/snapuserd";
@@ -521,15 +521,11 @@ int FirstStageMain(int argc, char** argv) {
         setenv("INIT_FORCE_DEBUGGABLE", "true", 1);
     }
 
+    // Legacy device (no A/B): skip the SwitchRoot path. /system is mounted in
+    // place below, and bind-mounting the initramfs root to itself EINVALs on
+    // the old kernel.
     if (ForceNormalBoot(cmdline, bootconfig)) {
-        mkdir("/first_stage_ramdisk", 0755);
-        PrepareSwitchRoot();
-        // SwitchRoot() must be called with a mount point as the target, so we bind mount the
-        // target directory to itself here.
-        if (mount("/first_stage_ramdisk", "/first_stage_ramdisk", nullptr, MS_BIND, nullptr) != 0) {
-            PLOG(FATAL) << "Could not bind mount /first_stage_ramdisk to itself";
-        }
-        SwitchRoot("/first_stage_ramdisk");
+        LOG(WARNING) << "ForceNormalBoot=true but skipping SwitchRoot for legacy device";
     }
 
     if (IsRecoveryMode()) {

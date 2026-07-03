@@ -25,7 +25,9 @@ on property:vendor.sys.usb.adb.disabled=*
 
 # Used to disable USB when switching states
 on property:sys.usb.config=none && property:sys.usb.configfs=0
-    stop adbd
+    # Do not stop adbd on the transient 'none' state: UsbDeviceManager sets
+    # config=none briefly between two real configs, and killing adbd here
+    # breaks the connection before the CNXN handshake completes.
     write /sys/class/android_usb/android0/enable 0
     write /sys/class/android_usb/android0/bDeviceClass 0
     setprop sys.usb.state ${sys.usb.config}

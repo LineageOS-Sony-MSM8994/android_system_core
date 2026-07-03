@@ -15,8 +15,13 @@
 #include <chrono>
 #include <string_view>
 #include <vector>
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <sys/sysmacros.h>
+#include <unistd.h>
 
 #include <android-base/chrono_utils.h>
+#include <android-base/file.h>
 #include <android-base/logging.h>
 #include <android-base/strings.h>
 #include <fs_mgr.h>
@@ -72,6 +77,15 @@ bool BlockDevInitializer::InitBootDevicesFromPartUuid() {
     // partition but didn't. Later code would fail too but the message there
     // is a bit further from the root cause of the problem.
     if (!uuid_check_done) {
+        // Legacy bootloaders provide no boot_part_uuid; if androidboot.bootdevice
+        // is in cmdline the boot device is already known, so continue.
+        auto boot_devs = android::fs_mgr::GetBootDevices();
+        if (!boot_devs.empty()) {
+            LOG(WARNING) << __PRETTY_FUNCTION__
+                         << ": boot partition UUID timeout, but boot_devices already known via "
+                         << "androidboot.bootdevice (" << *boot_devs.begin() << "), continuing.";
+            return true;
+        }
         LOG(ERROR) << __PRETTY_FUNCTION__ << ": boot partition not found after polling timeout.";
         return false;
     }
@@ -117,6 +131,45 @@ bool BlockDevInitializer::InitMiscDevice(const std::string& name) {
         LOG(INFO) << "Wait for " << name << " returned after " << t;
     }
     if (!found) {
+        // If the misc-device uevent was missed (registered before init listened),
+        // read /sys/<dm>/uevent and mknod the /dev node directly.
+        const std::string sysfs_uevent = "/sys" + dm_path + "/uevent";
+        LOG(WARNING) << "InitMiscDevice fallback: attempting to read " << sysfs_uevent;
+
+        struct stat st;
+        if (stat(sysfs_uevent.c_str(), &st) != 0) {
+            PLOG(WARNING) << "InitMiscDevice fallback: stat() failed on " << sysfs_uevent;
+        } else {
+            LOG(WARNING) << "InitMiscDevice fallback: stat() ok size=" << st.st_size;
+        }
+
+        std::string contents;
+        if (!android::base::ReadFileToString(sysfs_uevent, &contents)) {
+            PLOG(ERROR) << "InitMiscDevice fallback: ReadFileToString failed on " << sysfs_uevent;
+        } else {
+            LOG(WARNING) << "InitMiscDevice fallback: read " << contents.size() << " bytes";
+            int major = -1, minor = -1;
+            std::string devname;
+            for (const auto& line : android::base::Split(contents, "\n")) {
+                if (android::base::StartsWith(line, "MAJOR=")) major = atoi(line.c_str() + 6);
+                else if (android::base::StartsWith(line, "MINOR=")) minor = atoi(line.c_str() + 6);
+                else if (android::base::StartsWith(line, "DEVNAME=")) devname = line.substr(8);
+            }
+            if (major >= 0 && minor >= 0 && !devname.empty()) {
+                std::string dev_path = "/dev/" + devname;
+                unlink(dev_path.c_str());
+                if (mknod(dev_path.c_str(), S_IFCHR | 0600, makedev(major, minor)) == 0) {
+                    LOG(WARNING) << "InitMiscDevice fallback: created " << dev_path
+                                 << " (" << major << ":" << minor << ") for " << name;
+                    return true;
+                } else {
+                    PLOG(ERROR) << "InitMiscDevice fallback: mknod failed for " << dev_path;
+                }
+            } else {
+                LOG(ERROR) << "InitMiscDevice fallback: malformed uevent (M=" << major
+                           << " m=" << minor << " name='" << devname << "')";
+            }
+        }
         LOG(ERROR) << name << " device not found after polling timeout";
         return false;
     }
